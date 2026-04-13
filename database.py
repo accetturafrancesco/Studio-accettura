@@ -97,6 +97,12 @@ def insert_paziente(nome, cognome, eta, sesso, telefono, cond_tipo, cond_desc, i
         )
         return cur.lastrowid
 
+def delete_paziente(pid):
+    with conn() as c:
+        c.execute("DELETE FROM sedute WHERE paziente_id=?", (pid,))
+        c.execute("DELETE FROM appuntamenti WHERE paziente_id=?", (pid,))
+        c.execute("DELETE FROM pazienti WHERE id=?", (pid,))
+
 def update_paziente_piano(pid, piano, flags):
     with conn() as c:
         c.execute("UPDATE pazienti SET piano=?, flags=? WHERE id=?",
