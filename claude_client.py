@@ -90,7 +90,7 @@ def valuta_paziente(paziente: dict, immagini_b64: list = []) -> dict:
     content = _imgs_to_content(immagini_b64)
     content.append({"type": "text", "text": PROMPT_VALUTAZIONE.format(**paziente)})
     r = client.messages.create(
-        model=MODEL, max_tokens=3000,
+        model=MODEL, max_tokens=4096,
         system=_base(),
         messages=[{"role": "user", "content": content}],
     )
@@ -202,7 +202,7 @@ def genera_seduta(paziente: dict, piano: dict, numero: int, totale: int,
         numero=numero, totale=totale, freq_sett=freq_sett,
     )
     r = client.messages.create(
-        model=MODEL, max_tokens=4000,
+        model=MODEL, max_tokens=4096,
         system=_base(),
         messages=[{"role": "user", "content": prompt}],
     )
