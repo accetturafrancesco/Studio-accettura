@@ -4,248 +4,109 @@ import database as db
 MODEL = "claude-sonnet-4-6"
 client = anthropic.Anthropic()
 
-# ── PROMPT BASE ───────────────────────────────────────────────────────────────
-BASE = """Sei il Dott. Francesco Accettura, fisioterapista domiciliare con 25 anni di esperienza.
-Specializzazioni: ortopedia/muscoloscheletrico, neurologia, pediatria.
-
-CONTESTO OPERATIVO FONDAMENTALE:
-- Trattamenti SEMPRE domiciliari: niente macchinari ospedalieri, niente attrezzatura da palestra
-- Attrezzatura disponibile: {attrezzatura}
-- Prediligi esercizi a corpo libero e contro resistenza manuale o con elastici
-- Ogni seduta dura 45 minuti (incluse rivalutazione e pausa)
-- Frequenza: max 3 sedute/settimana
-
-STILE: {stile}
-NOTE GENERALI: {note}
-PERSONALIZZAZIONI: {extra}
-"""
+BASE = """Sei il Dott. Francesco Accettura, fisioterapista domiciliare specializzato in ortopedia, neurologia e pediatria.
+Contesto: trattamenti SEMPRE domiciliari. Attrezzatura: {attrezzatura}.
+Prediligi corpo libero, resistenza manuale, loop band, cavigliere.
+Sedute da 45 minuti, max 3/settimana.
+Stile: {stile}. Note: {note}. Extra: {extra}.
+IMPORTANTE: rispondi SOLO con JSON valido e compatto. Niente testo fuori dal JSON. Niente markdown."""
 
 def _base():
     att = ", ".join([a["nome"] for a in db.get_attrezzatura()])
     return BASE.format(
         attrezzatura=att,
-        stile=db.get_setting("stile", "tecnico e dettagliato"),
+        stile=db.get_setting("stile", "tecnico"),
         note=db.get_setting("note_generali", ""),
         extra=db.get_setting("prompt_extra", ""),
     )
 
-def _imgs_to_content(immagini_b64: list) -> list:
-    """Converte lista base64 in content blocks per Claude Vision."""
+def _parse(txt):
+    txt = txt.strip()
+    txt = txt.replace("```json","").replace("```","").strip()
+    # Prova parsing diretto
+    try:
+        return json.loads(txt)
+    except json.JSONDecodeError:
+        # Tenta riparazione: tronca all'ultima } o ] valida
+        for i in range(len(txt)-1, -1, -1):
+            if txt[i] in ('}', ']'):
+                try:
+                    return json.loads(txt[:i+1])
+                except Exception:
+                    continue
+        raise ValueError("JSON non riparabile")
+
+def _imgs_to_content(imgs):
     content = []
-    for img in immagini_b64:
+    for img in imgs:
         if "," in img:
             header, data = img.split(",", 1)
-            mt = header.split(":")[1].split(";")[0] if ":" in header else "image/jpeg"
+            mt = header.split(":")[1].split(";")[0]
         else:
             data, mt = img, "image/jpeg"
-        content.append({"type": "image", "source": {"type": "base64", "media_type": mt, "data": data}})
+        content.append({"type":"image","source":{"type":"base64","media_type":mt,"data":data}})
     return content
 
-# ── 1. VALUTAZIONE INIZIALE ───────────────────────────────────────────────────
-PROMPT_VALUTAZIONE = """
-Analizza il paziente e genera un piano riabilitativo completo in JSON.
-Il paziente è: {nome} {cognome}, {eta} anni, sesso {sesso}.
-Tipo condizione: {cond_tipo}
-Descrizione: {cond_desc}
+# ── VALUTAZIONE ───────────────────────────────────────────────────────────────
+PROMPT_VAL = """Paziente: {nome} {cognome}, {eta} anni, {sesso}. Tipo: {cond_tipo}. Descrizione: {cond_desc}
 
-Rispondi SOLO con JSON valido, nessun testo fuori dal JSON:
-{{
-  "diagnosi_fisio": "...",
-  "diagnosi_differenziale": ["...", "..."],
-  "strutture_coinvolte": ["..."],
-  "stadio": "acuto|subacuto|cronico",
-  "flags": {{
-    "red": ["...", "..."],
-    "yellow": ["...", "..."],
-    "black": ["...", "..."],
-    "orange": ["...", "..."],
-    "blue": ["...", "..."]
-  }},
-  "tests_consigliati": [
-    {{
-      "nome": "...",
-      "obiettivo": "...",
-      "procedura_passo_passo": ["passo 1", "passo 2", "passo 3"],
-      "positivo_se": "...",
-      "significato_clinico": "..."
-    }}
-  ],
-  "suggerimento_sedute": {{
-    "settimanali_min": 1,
-    "settimanali_max": 3,
-    "settimanali_consigliato": 2,
-    "totali_stimate": 12,
-    "rationale": "..."
-  }},
-  "obiettivi": {{
-    "breve_termine": "...",
-    "medio_termine": "...",
-    "lungo_termine": "..."
-  }},
-  "note_cliniche": "..."
-}}
-"""
+Rispondi SOLO con questo JSON (sii conciso, max 3 voci per lista):
+{{"diagnosi_fisio":"...","diagnosi_differenziale":["...","..."],"strutture_coinvolte":["..."],"stadio":"acuto|subacuto|cronico","flags":{{"red":["..."],"yellow":["..."],"black":[],"orange":[],"blue":[]}},"tests_consigliati":[{{"nome":"...","obiettivo":"...","procedura_passo_passo":["1...","2...","3..."],"positivo_se":"...","significato_clinico":"..."}}],"suggerimento_sedute":{{"settimanali_consigliato":2,"totali_stimate":12,"rationale":"..."}},"obiettivi":{{"breve_termine":"...","medio_termine":"...","lungo_termine":"..."}}}}"""
 
-def valuta_paziente(paziente: dict, immagini_b64: list = []) -> dict:
-    content = _imgs_to_content(immagini_b64)
-    content.append({"type": "text", "text": PROMPT_VALUTAZIONE.format(**paziente)})
+def valuta_paziente(paz, imgs=[]):
+    content = _imgs_to_content(imgs)
+    content.append({"type":"text","text":PROMPT_VAL.format(**paz)})
     r = client.messages.create(
-        model=MODEL, max_tokens=4096,
+        model=MODEL, max_tokens=2000,
         system=_base(),
-        messages=[{"role": "user", "content": content}],
+        messages=[{"role":"user","content":content}],
     )
-    txt = r.content[0].text.strip()
-    txt = txt.replace("```json","").replace("```","").strip()
-    return json.loads(txt)
+    return _parse(r.content[0].text)
 
-# ── 2. PROTOCOLLO SEDUTA ──────────────────────────────────────────────────────
-PROMPT_SEDUTA = """
-Genera il protocollo dettagliato per la SEDUTA N.{numero} di {totale} totali.
-Frequenza: {freq_sett} seduta/e per settimana.
+# ── SEDUTA ────────────────────────────────────────────────────────────────────
+PROMPT_SED = """Seduta {numero}/{totale}. Paziente: {nome} {cognome}, {eta}a, {sesso}.
+Diagnosi: {diagnosi_fisio}. Stadio: {stadio}. Flags: {flags}. Obs precedente: {obs_prec}.
+Frequenza: {freq_sett}/sett. DOMICILIARE, 45 min totali.
 
-PAZIENTE: {nome} {cognome}, {eta} anni, {sesso}
-DIAGNOSI: {diagnosi_fisio}
-STADIO: {stadio}
-FLAGS ATTIVE: {flags_rilevanti}
-OSSERVAZIONI SEDUTA PRECEDENTE: {obs_prec}
+Rispondi SOLO con questo JSON (descrizioni brevi e chiare, max 4 esercizi per fase):
+{{"rivalutazione":{{"durata_min":5,"checklist":["...","..."],"domande_chiave":["...","..."]}},"fase_passiva":{{"durata_min":10,"descrizione":"...","esercizi":[{{"id":"p1","nome":"...","tipo":"passivo","desc_tecnica":"...","desc_paziente":"...","posizione":"...","serie":3,"ripetizioni":10,"durata_sec":null,"frequenza_hep":"non per HEP","downscaling":"...","attrezzatura":"corpo libero","youtube":"...","note_cliniche":"..."}}]}},"fase_attiva":{{"durata_min":25,"descrizione":"...","esercizi":[{{"id":"a1","nome":"...","tipo":"attivo","desc_tecnica":"...","desc_paziente":"...","posizione":"...","serie":3,"ripetizioni":15,"durata_sec":null,"frequenza_hep":"ogni giorno","downscaling":"...","attrezzatura":"corpo libero","youtube":"...","note_cliniche":"..."}}]}},"hep":{{"note_generali":"...","esercizi":[{{"id":"h1","nome":"...","desc_paziente":"Spiegazione semplice passo passo senza termini tecnici.","posizione":"...","serie":2,"ripetizioni":10,"durata_sec":null,"frequenza":"ogni giorno","attrezzatura":"corpo libero","youtube":"..."}}]}}}}"""
 
-Genera un protocollo 45 minuti DOMICILIARE. Rispondi SOLO JSON:
-{{
-  "rivalutazione": {{
-    "durata_min": 5,
-    "checklist": ["item da verificare 1", "item 2", "item 3"],
-    "scale": ["NRS 0-10", "ROM se pertinente"],
-    "domande_chiave": ["domanda 1", "domanda 2"]
-  }},
-  "fase_passiva": {{
-    "durata_min": 10,
-    "descrizione": "...",
-    "esercizi": [
-      {{
-        "id": "p1",
-        "nome": "Nome esercizio",
-        "tipo": "passivo|assistito",
-        "desc_tecnica": "Descrizione tecnica dettagliata per il fisioterapista...",
-        "desc_paziente": "Spiegazione semplice in italiano quotidiano per il paziente...",
-        "posizione": "posizione di partenza del paziente",
-        "serie": 3,
-        "ripetizioni": 10,
-        "durata_sec": null,
-        "frequenza_hep": "ogni giorno|a giorni alterni|non per HEP",
-        "downscaling": "Come semplificare se il paziente non riesce",
-        "attrezzatura": "corpo libero|loop band|cavigliera|resistenza manuale",
-        "youtube": "query youtube per cercare video dell'esercizio",
-        "note_cliniche": "perché questo esercizio in questa fase"
-      }}
-    ]
-  }},
-  "fase_attiva": {{
-    "durata_min": 25,
-    "descrizione": "...",
-    "esercizi": [
-      {{
-        "id": "a1",
-        "nome": "Nome esercizio",
-        "tipo": "attivo|attivo-assistito|rinforzo",
-        "desc_tecnica": "...",
-        "desc_paziente": "...",
-        "posizione": "...",
-        "serie": 3,
-        "ripetizioni": 15,
-        "durata_sec": null,
-        "frequenza_hep": "ogni giorno|a giorni alterni|non per HEP",
-        "downscaling": "...",
-        "attrezzatura": "...",
-        "youtube": "...",
-        "note_cliniche": "..."
-      }}
-    ]
-  }},
-  "hep": {{
-    "titolo": "Esercizi per casa — giorni liberi dal trattamento",
-    "note_generali": "...",
-    "esercizi": [
-      {{
-        "id": "h1",
-        "nome": "Nome esercizio",
-        "desc_paziente": "Spiegazione molto semplice, passo per passo, in italiano quotidiano. Nessun termine tecnico. Spiega come se il paziente non avesse mai fatto fisioterapia.",
-        "posizione": "...",
-        "serie": 2,
-        "ripetizioni": 10,
-        "durata_sec": null,
-        "frequenza": "ogni giorno|a giorni alterni",
-        "attrezzatura": "...",
-        "youtube": "..."
-      }}
-    ]
-  }},
-  "note_seduta": "...",
-  "progressione_verso_prossima": "..."
-}}
-"""
+def genera_seduta(paziente, piano, numero, totale, freq_sett, obs_prec=""):
+    flags = []
+    for k, v in (piano.get("flags") or {}).items():
+        if v: flags.append(f"[{k.upper()}] {', '.join(v)}")
 
-def genera_seduta(paziente: dict, piano: dict, numero: int, totale: int,
-                  freq_sett: int, obs_prec: str = "") -> dict:
-    flags_rilevanti = []
-    if piano.get("flags"):
-        for k, v in piano["flags"].items():
-            if v:
-                flags_rilevanti.append(f"[{k.upper()}] {', '.join(v)}")
-
-    prompt = PROMPT_SEDUTA.format(
-        nome=paziente["nome"], cognome=paziente["cognome"],
-        eta=paziente["eta"], sesso=paziente["sesso"],
-        diagnosi_fisio=piano.get("diagnosi_fisio","N/D"),
-        stadio=piano.get("stadio","N/D"),
-        flags_rilevanti="; ".join(flags_rilevanti) or "Nessuna",
-        obs_prec=obs_prec or "Prima seduta",
-        numero=numero, totale=totale, freq_sett=freq_sett,
-    )
     r = client.messages.create(
-        model=MODEL, max_tokens=4096,
+        model=MODEL, max_tokens=3000,
         system=_base(),
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role":"user","content": PROMPT_SED.format(
+            nome=paziente["nome"], cognome=paziente["cognome"],
+            eta=paziente["eta"], sesso=paziente["sesso"],
+            diagnosi_fisio=piano.get("diagnosi_fisio","N/D"),
+            stadio=piano.get("stadio","N/D"),
+            flags="; ".join(flags) or "nessuna",
+            obs_prec=obs_prec or "prima seduta",
+            numero=numero, totale=totale, freq_sett=freq_sett,
+        )}],
     )
-    txt = r.content[0].text.strip().replace("```json","").replace("```","").strip()
-    return json.loads(txt)
+    return _parse(r.content[0].text)
 
-# ── 3. CHAT IMPOSTAZIONI ──────────────────────────────────────────────────────
-PROMPT_SETTINGS_SYSTEM = """Sei un assistente di configurazione per il sistema clinico del Dott. Francesco Accettura.
-Il tuo compito è interpretare le richieste dell'utente e restituire SEMPRE un JSON con le modifiche da applicare.
+# ── CHAT IMPOSTAZIONI ─────────────────────────────────────────────────────────
+SYS_SET = """Sei l'assistente di configurazione del Dott. Francesco Accettura.
+Interpreta le richieste e restituisci SOLO JSON:
+{{"risposta":"...","azioni":{{"prompt_extra":null,"note_generali":null,"stile":null}},"attrezzatura_aggiungi":[],"attrezzatura_rimuovi":[]}}
+Impostazioni attuali — prompt_extra: {extra}, note: {note}, stile: {stile}"""
 
-Impostazioni correnti:
-- prompt_extra: {extra}
-- note_generali: {note}
-- stile: {stile}
-
-Quando l'utente dice cose come "aggiungi cavigliere 2kg", "togli i link YouTube", "voglio risposte più brevi",
-"aggiungi fisioterapia respiratoria", ecc., traduci in aggiornamenti al sistema.
-
-Rispondi con JSON:
-{{
-  "risposta": "Messaggio amichevole che conferma cosa hai fatto",
-  "azioni": {{
-    "prompt_extra": "nuovo valore o null per non cambiare",
-    "note_generali": "nuovo valore o null",
-    "stile": "nuovo valore o null"
-  }},
-  "attrezzatura_aggiungi": [{{"nome":"...","descrizione":"..."}}],
-  "attrezzatura_rimuovi": []
-}}
-"""
-
-def chat_impostazioni(history: list, user_msg: str) -> dict:
-    system = PROMPT_SETTINGS_SYSTEM.format(
+def chat_impostazioni(history, user_msg):
+    system = SYS_SET.format(
         extra=db.get_setting("prompt_extra",""),
         note=db.get_setting("note_generali",""),
         stile=db.get_setting("stile","tecnico"),
     )
-    msgs = [{"role": m["role"], "content": m["content"]} for m in history]
-    msgs.append({"role": "user", "content": user_msg})
+    msgs = [{"role":m["role"],"content":m["content"]} for m in history]
+    msgs.append({"role":"user","content":user_msg})
     r = client.messages.create(
-        model=MODEL, max_tokens=1000,
-        system=system,
-        messages=msgs,
+        model=MODEL, max_tokens=800,
+        system=system, messages=msgs,
     )
-    txt = r.content[0].text.strip().replace("```json","").replace("```","").strip()
-    return json.loads(txt)
+    return _parse(r.content[0].text)
